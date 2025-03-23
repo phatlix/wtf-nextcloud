@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 
-# WTF NEXCLOUD v1.6
+# WTF NEXCLOUD v1.8
 #
 # Script assumes the following:
 #   - bash 4+
@@ -38,28 +38,24 @@ SCRIPTDIR=$(pwd);
 
 # --- SCREEN LOGGING ---
 
-log_step() {
-  printf "\n${CYN}[STEP] %s${NON}\n\n" "$1"
-}
-log_info() {
-  printf "\n${YLW}[INFO] %s${NON}\n\n" "$1"
-}
-log_error() {
-  printf "\n${RED}[ERROR] %s${NON}\n\n" "$1" >&2
-}
+log_step() { printf "\n${CYN}[STEP] %s${NON}\n\n" "$1"; }
+log_info() { printf "\n${YLW}[INFO] %s${NON}\n\n" "$1"; }
+log_error() { printf "\n${RED}[ERROR] %s${NON}\n\n" "$1" >&2; }
 
 
 # --- CLI USAGE ---
 
 usage() {
   cat <<EOF
-Usage: $0 [-p|--path <nextcloud_path>] [-l|--list] [-c|--convert] [-u|--upgrade] [-h|--help]
+Usage: $0 [-p|--path <nextcloud_path>] [-l|--list] [-c|--convert] [-u|--upgrade] [-n|--no-repair] [-v|--version] [-h|--help]
 
 Options:
   -p, --path PATH     Path to Nextcloud installation
   -l, --list          List available Nextcloud installations
-  -c, --convert       Backup and convert tables to ROW_FORMAT=DYNAMIC
+  -c, --convert       Backup and convert tables to DYNAMIC row format
   -u, --upgrade       Upgrade Nextcloud (will convert db first)
+  -n, --no-repair     Skip final repair steps
+  -v, --version       Show script version
   -h, --help          Show this help message
 EOF
   exit 0
@@ -71,15 +67,18 @@ EOF
 LIST_ONLY=false
 DBCONVERT=false
 NCUPGRADE=false
+NOREPAIRS=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -p|--path) NCPATH="$2";        shift 2  ;;
-    -l|--list) LIST_ONLY=true;     shift    ;;
-    -c|--convert) DBCONVERT=true;  shift    ;;
-    -u|--upgrade) NCUPGRADE=true;  shift    ;;
-    -h|--help) usage                        ;;
-    *) usage                                ;;
+    -p|--path) NCPATH="$2";                    shift 2 ;;
+    -l|--list) LIST_ONLY=true;                 shift   ;;
+    -c|--convert) DBCONVERT=true;              shift   ;;
+    -u|--upgrade) NCUPGRADE=true;              shift   ;;
+    -n|--no-repair) NOREPAIRS=true;            shift   ;;
+    -v|--version) echo "WTF NEXTCLOUD ${VER}";  exit 0 ;;
+    -h|--help) usage                                   ;;
+    *) usage                                           ;;
   esac
 done
 
@@ -101,8 +100,8 @@ list_occ_instances() {
   printf "${PRP}Detected Nextcloud installations:${NON}\n\n"
   for i in "${!OCC_LIST[@]}"; do
     occ_dir=$(dirname "${OCC_LIST[$i]}")
-    label=$(sudo -u nginx php "$occ_dir/occ" --version 2>/dev/null | head -n1 | xargs)
-    printf " [%d] %-30s (%s)\n" "$i" "$label" "${OCC_LIST[$i]}"
+    label=$(sudo -u nginx php "${occ_dir}/occ" --version 2>/dev/null | head -n1 | xargs)
+    printf " [%d] %-30s (%s)\n" "$i" "${label}" "${OCC_LIST[$i]}"
   done
   printf "\n"
   exit 0
@@ -115,13 +114,13 @@ select_occ_instance() {
   declare -A OCC_LABELS
   for i in "${!OCC_LIST[@]}"; do
     occ_dir=$(dirname "${OCC_LIST[$i]}")
-    label=$(sudo -u nginx php "$occ_dir/occ" --version 2>/dev/null | head -n1 | xargs)
-    OCC_LABELS[$i]="$label"
+    label=$(sudo -u nginx php "${occ_dir}/occ" --version 2>/dev/null | head -n1 | xargs)
+    OCC_LABELS[$i]="${label}"
   done
 
   if [[ ${#OCC_LIST[@]} -eq 1 ]]; then
     NCPATH=$(dirname "${OCC_LIST[0]}")
-    log_info "Auto-detected single Nextcloud instance: ${OCC_LABELS[0]} at $NCPATH"
+    log_info "Auto-detected single Nextcloud instance: ${OCC_LABELS[0]} at ${NCPATH}"
   else
     printf "${PRP}Multiple Nextcloud installations detected:${NON}\n\n"
     for i in "${!OCC_LIST[@]}"; do
@@ -129,12 +128,12 @@ select_occ_instance() {
     done
     printf "\n${PRP}Select the instance number you want to use:${NON} "
     read -r choice
-    if [[ -z "${OCC_LIST[$choice]:-}" ]]; then
+    if [[ -z "${OCC_LIST[${choice}]:-}" ]]; then
       log_error "Invalid selection."
       exit 1
     fi
     printf "\n"
-    NCPATH=$(dirname "${OCC_LIST[$choice]}")
+    NCPATH=$(dirname "${OCC_LIST[${choice}]}")
   fi
 }
 
@@ -143,7 +142,7 @@ select_occ_instance() {
 
 validate_nc_path() {
   if [[ ! -f "$NCPATH/config/config.php" || ! -f "$NCPATH/occ" ]]; then
-    log_error "Invalid Nextcloud Path: '$NCPATH'"
+    log_error "Invalid Nextcloud Path: '${NCPATH}'"
     printf "\n${GRY}The ${DRD}config.php${NON} and ${DRD}occ${NON} files were not found.\n\n"
     exit 1
   fi
@@ -157,7 +156,7 @@ extract_db_config() {
     $2 == "dbuser"     { print "dbuser=\"" $4 "\"" }
     $2 == "dbpassword" { print "dbpassword=\"" $4 "\"" }
     $2 == "dbname"     { print "dbname=\"" $4 "\"" }
-  ' "$NCPATH/config/config.php")
+  ' "${NCPATH}/config/config.php")
 }
 
 
@@ -170,14 +169,14 @@ db_convert() {
   mkdir -p "${DBBAK}"
   backup_file="${DBBAK}/${dbname}_backup_${timestamp}.sql.gz"
 
-  log_step "Backing up database: $backup_file"
+  log_step "Backing up database: ${backup_file}"
   mysqldump --single-transaction --quick \
-    -u "$dbuser" -p"$dbpassword" "$dbname" | gzip > "$backup_file"
+    -u "${dbuser}" -p"${dbpassword}" "${dbname}" | gzip > "${backup_file}"
 
   log_step "Checking for tables with non-DYNAMIC row format..."
-  dynamic_needed=$(mysql -u "$dbuser" -p"$dbpassword" "$dbname" -Nse "
+  dynamic_needed=$(mysql -u "${dbuser}" -p"${dbpassword}" "${dbname}" -Nse "
     SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_SCHEMA = '$dbname'
+    WHERE TABLE_SCHEMA = '${dbname}'
     AND ENGINE = 'InnoDB'
     AND ROW_FORMAT != 'DYNAMIC';
   ")
@@ -186,25 +185,24 @@ db_convert() {
     log_info "All tables currently use the DYNAMIC row format. Skipping conversion."
     return
   else
-    log_info "$dynamic_needed tables will be converted to DYNAMIC row format."
+    log_info "${dynamic_needed} tables will be converted to DYNAMIC row format."
   fi
 
   log_step "Converting tables..."
-  mysql -u "$dbuser" -p"$dbpassword" "$dbname" -Bse "
+  mysql -u "${dbuser}" -p"${dbpassword}" "${dbname}" -Bse "
     SELECT CONCAT('ALTER TABLE \`', TABLE_NAME, '\` ROW_FORMAT=DYNAMIC;')
     FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_SCHEMA = '$dbname'
+    WHERE TABLE_SCHEMA = '${dbname}'
     AND ENGINE = 'InnoDB'
     AND ROW_FORMAT != 'DYNAMIC'
-  " | mysql -u "$dbuser" -p"$dbpassword" "$dbname"
+  " | mysql -u "${dbuser}" -p"${dbpassword}" "${dbname}"
 }
 
 
 # --- PERFORM NEXTCLOUD UPGRADE ---
 
 nc_upgrade() {
-  cd "$NCPATH"
-
+  cd "${NCPATH}"
   db_convert
   log_step "PERFORMING NEXTCLOUD UPGRADE"
   sudo -u nginx php updater/updater.phar --no-interaction
@@ -214,7 +212,7 @@ nc_upgrade() {
 # --- RUN UPDATE REPAIRS ---
 
 run_repair() {
-  cd "$NCPATH"
+  cd "${NCPATH}"
 
   log_step "EMPTY NEXTCLOUD LOG"
   > data/nextcloud.log
@@ -251,21 +249,20 @@ run_repair() {
 }
 
 
-# --- RUN SCRIPT ---
+# --- EXECUTE ---
 
 log_info "WTF NEXTCLOUD (${VER}) - STARTED"
 
 discover_occ_instances
 
-[[ "$LIST_ONLY" == true ]] && list_occ_instances
-[[ -z "$NCPATH" ]] && select_occ_instance
+[[ "${LIST_ONLY}" == true ]] && list_occ_instances
+[[ -z "${NCPATH}" ]] && select_occ_instance
 
 validate_nc_path
 
-[[ "$NCUPGRADE" == true ]] && nc_upgrade
-[[ "$DBCONVERT" == true ]] && db_convert
-
-run_repair
+[[ "${NCUPGRADE}" == true ]] && nc_upgrade
+[[ "${DBCONVERT}" == true ]] && db_convert
+[[ "${NOREPAIRS}" == true ]] && run_repair
 
 log_info "WTF NEXTCLOUD (${VER}) - FINISHED"
 
