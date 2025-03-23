@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 
-# WTF NEXCLOUD v1.5
+# WTF NEXCLOUD v1.6
 #
 # Script assumes the following:
 #   - bash 4+
@@ -14,8 +14,9 @@ set -euo pipefail
 
 # --- HARDCODE ---
 
-NCPATH=""          # set the nextcloud path manually
-WEBROOT="/var/www" # directs the find instance function
+NCPATH=""             # set the nextcloud path manually (will not search for all instances if defined)
+WEBROOT="/var/www"    # directs the find instance function (no need to scan the whole system)
+DBBAK="/var/www/dbb"  # db backups location (will be created it it don't exist)
 
 
 # --- COLORS ---
@@ -32,6 +33,7 @@ NON="\e[0m"    # Reset
 # --- SCRIPT VERSION
 
 VER=$(grep -E '^# *WTF NEXCLOUD' "$0" | sed -E 's/^# *WTF NEXCLOUD *//');
+SCRIPTDIR=$(pwd);
 
 
 # --- SCREEN LOGGING ---
@@ -165,8 +167,8 @@ db_convert() {
   extract_db_config
   local timestamp backup_file
   timestamp=$(date +"%Y%m%d_%H%M%S")
-  script_dir="$(cd "$(dirname "$0")" && pwd)"
-  backup_file="${script_dir}/${dbname}_backup_${timestamp}.sql.gz"
+  mkdir -p "${DBBAK}"
+  backup_file="${DBBAK}/${dbname}_backup_${timestamp}.sql.gz"
 
   log_step "Backing up database: $backup_file"
   mysqldump --single-transaction --quick \
