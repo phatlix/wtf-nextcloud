@@ -262,7 +262,7 @@ validate_nc_path
 
 [[ "${NCUPGRADE}" == true ]] && nc_upgrade
 [[ "${DBCONVERT}" == true ]] && db_convert
-[[ "${NOREPAIRS}" == true ]] && run_repair
+[[ "${NOREPAIRS}" == false ]] && run_repair
 
 log_info "WTF NEXTCLOUD (${VER}) - FINISHED"
 
