@@ -2,6 +2,12 @@
 # 
 # WTF NEXCLOUD v1.5
 #
+# Script assumes the following:
+#   - bash 4+
+#   - nginx
+#   - php-fpm
+#   - redis
+#   - mariadb
 
 set -euo pipefail
 
