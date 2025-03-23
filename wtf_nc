@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# 
+# WTF NEXCLOUD v1.5
+#
+
+set -euo pipefail
+
+
+# --- HARDCODE ---
+
+NCPATH=""          # set the nextcloud path manually
+WEBROOT="/var/www" # directs the find instance function
+
+
+# --- COLORS ---
+
+DRD="\e[31m"   # Dark Red
+GRY="\e[90m"   # Gray
+RED="\e[91m"   # Red
+YLW="\e[93m"   # Yellow
+PRP="\e[95m"   # Purple
+CYN="\e[96m"   # Cyan
+NON="\e[0m"    # Reset
+
+
+# --- SCRIPT VERSION
+
+VER=$(grep -E '^# *WTF NEXCLOUD' "$0" | sed -E 's/^# *WTF NEXCLOUD *//');
+
+
+# --- SCREEN LOGGING ---
+
+log_step() {
+  printf "\n${CYN}[STEP] %s${NON}\n\n" "$1"
+}
+log_info() {
+  printf "\n${YLW}[INFO] %s${NON}\n\n" "$1"
+}
+log_error() {
+  printf "\n${RED}[ERROR] %s${NON}\n\n" "$1" >&2
+}
+
+
+# --- CLI USAGE ---
+
+usage() {
+  cat <<EOF
+Usage: $0 [-p|--path <nextcloud_path>] [-l|--list] [-c|--convert] [-u|--upgrade] [-h|--help]
+
+Options:
+  -p, --path PATH     Path to Nextcloud installation
+  -l, --list          List available Nextcloud installations
+  -c, --convert       Backup and convert tables to ROW_FORMAT=DYNAMIC
+  -u, --upgrade       Upgrade Nextcloud (will convert db first)
+  -h, --help          Show this help message
+EOF
+  exit 0
+}
+
+
+# --- CLI ARG PARSING ---
+
+LIST_ONLY=false
+DBCONVERT=false
+NCUPGRADE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--path) NCPATH="$2";        shift 2  ;;
+    -l|--list) LIST_ONLY=true;     shift    ;;
+    -c|--convert) DBCONVERT=true;  shift    ;;
+    -u|--upgrade) NCUPGRADE=true;  shift    ;;
+    -h|--help) usage                        ;;
+    *) usage                                ;;
+  esac
+done
+
+
+# --- DISCOVER NEXTCLOUD OCC BINARIES ---
+
+discover_occ_instances() {
+  mapfile -t OCC_LIST < <(find "${WEBROOT}" -type f -name occ -executable 2>/dev/null | grep -Ev '/vendor/|/tests/' | grep -E '/occ$')
+  if [[ ${#OCC_LIST[@]} -eq 0 ]]; then
+    log_error "No Nextcloud instances found within ${WEBROOT}."
+    exit 1
+  fi
+}
+
+
+# --- LIST NEXTCLOUD INSTANCES AND EXIT ---
+
+list_occ_instances() {
+  printf "${PRP}Detected Nextcloud installations:${NON}\n\n"
+  for i in "${!OCC_LIST[@]}"; do
+    occ_dir=$(dirname "${OCC_LIST[$i]}")
+    label=$(sudo -u nginx php "$occ_dir/occ" --version 2>/dev/null | head -n1 | xargs)
+    printf " [%d] %-30s (%s)\n" "$i" "$label" "${OCC_LIST[$i]}"
+  done
+  printf "\n"
+  exit 0
+}
+
+
+# --- SELECT A NEXTCLOUD INSTANCE IF NEEDED ---
+
+select_occ_instance() {
+  declare -A OCC_LABELS
+  for i in "${!OCC_LIST[@]}"; do
+    occ_dir=$(dirname "${OCC_LIST[$i]}")
+    label=$(sudo -u nginx php "$occ_dir/occ" --version 2>/dev/null | head -n1 | xargs)
+    OCC_LABELS[$i]="$label"
+  done
+
+  if [[ ${#OCC_LIST[@]} -eq 1 ]]; then
+    NCPATH=$(dirname "${OCC_LIST[0]}")
+    log_info "Auto-detected single Nextcloud instance: ${OCC_LABELS[0]} at $NCPATH"
+  else
+    printf "${PRP}Multiple Nextcloud installations detected:${NON}\n\n"
+    for i in "${!OCC_LIST[@]}"; do
+      printf " [%d] %-30s (%s)\n" "$i" "${OCC_LABELS[$i]}" "${OCC_LIST[$i]}"
+    done
+    printf "\n${PRP}Select the instance number you want to use:${NON} "
+    read -r choice
+    if [[ -z "${OCC_LIST[$choice]:-}" ]]; then
+      log_error "Invalid selection."
+      exit 1
+    fi
+    printf "\n"
+    NCPATH=$(dirname "${OCC_LIST[$choice]}")
+  fi
+}
+
+
+# --- VALIDATE NEXTCLOUD PATH ---
+
+validate_nc_path() {
+  if [[ ! -f "$NCPATH/config/config.php" || ! -f "$NCPATH/occ" ]]; then
+    log_error "Invalid Nextcloud Path: '$NCPATH'"
+    printf "\n${GRY}The ${DRD}config.php${NON} and ${DRD}occ${NON} files were not found.\n\n"
+    exit 1
+  fi
+}
+
+
+# --- EXTRACT DB CREDS ---
+
+extract_db_config() {
+  eval $(awk -F"'" '
+    $2 == "dbuser"     { print "dbuser=\"" $4 "\"" }
+    $2 == "dbpassword" { print "dbpassword=\"" $4 "\"" }
+    $2 == "dbname"     { print "dbname=\"" $4 "\"" }
+  ' "$NCPATH/config/config.php")
+}
+
+
+# --- BACKUP AND CONVERT TABLES TO DYNAMIC ---
+
+db_convert() {
+  extract_db_config
+  local timestamp backup_file
+  timestamp=$(date +"%Y%m%d_%H%M%S")
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  backup_file="${script_dir}/${dbname}_backup_${timestamp}.sql.gz"
+
+  log_step "Backing up database: $backup_file"
+  mysqldump --single-transaction --quick \
+    -u "$dbuser" -p"$dbpassword" "$dbname" | gzip > "$backup_file"
+
+  log_step "Checking for tables with non-DYNAMIC row format..."
+  dynamic_needed=$(mysql -u "$dbuser" -p"$dbpassword" "$dbname" -Nse "
+    SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = '$dbname'
+    AND ENGINE = 'InnoDB'
+    AND ROW_FORMAT != 'DYNAMIC';
+  ")
+
+  if [[ "$dynamic_needed" -eq 0 ]]; then
+    log_info "All tables currently use the DYNAMIC row format. Skipping conversion."
+    return
+  else
+    log_info "$dynamic_needed tables will be converted to DYNAMIC row format."
+  fi
+
+  log_step "Converting tables..."
+  mysql -u "$dbuser" -p"$dbpassword" "$dbname" -Bse "
+    SELECT CONCAT('ALTER TABLE \`', TABLE_NAME, '\` ROW_FORMAT=DYNAMIC;')
+    FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = '$dbname'
+    AND ENGINE = 'InnoDB'
+    AND ROW_FORMAT != 'DYNAMIC'
+  " | mysql -u "$dbuser" -p"$dbpassword" "$dbname"
+}
+
+
+# --- PERFORM NEXTCLOUD UPGRADE ---
+
+nc_upgrade() {
+  cd "$NCPATH"
+
+  db_convert
+  log_step "PERFORMING NEXTCLOUD UPGRADE"
+  sudo -u nginx php updater/updater.phar --no-interaction
+}
+
+
+# --- RUN UPDATE REPAIRS ---
+
+run_repair() {
+  cd "$NCPATH"
+
+  log_step "EMPTY NEXTCLOUD LOG"
+  > data/nextcloud.log
+
+  log_step "ENSURING OCC IS EXECUTABLE"
+  chmod +x ./occ
+
+  log_step "FINISH UPGRADING NC IF NEEDED"
+  sudo -u nginx php ./occ upgrade
+
+  log_step "UPDATE ALL APPS"
+  sudo -u nginx php ./occ app:update --all
+
+  log_step "TURNING OFF MAINTENANCE MODE"
+  sudo -u nginx php ./occ maintenance:mode --off
+
+  log_step "REPAIRING EXPENSIVE TABLES"
+  sudo -u nginx php ./occ maintenance:repair --include-expensive
+
+  log_step "ADDING MISSING COLUMNS"
+  sudo -u nginx php ./occ db:add-missing-columns
+
+  log_step "ADDING MISSING INDICES"
+  sudo -u nginx php ./occ db:add-missing-indices
+
+  log_step "ADDING MISSING PRIMARY KEYS"
+  sudo -u nginx php ./occ db:add-missing-primary-keys
+
+  log_step "ENSURING OCC IS EXECUTABLE AGAIN"
+  chmod +x ./occ
+
+  log_step "RESTARTING SERVICES"
+  systemctl restart redis php-fpm nginx
+}
+
+
+# --- RUN SCRIPT ---
+
+log_info "WTF NEXTCLOUD (${VER}) - STARTED"
+
+discover_occ_instances
+
+[[ "$LIST_ONLY" == true ]] && list_occ_instances
+[[ -z "$NCPATH" ]] && select_occ_instance
+
+validate_nc_path
+
+[[ "$NCUPGRADE" == true ]] && nc_upgrade
+[[ "$DBCONVERT" == true ]] && db_convert
+
+run_repair
+
+log_info "WTF NEXTCLOUD (${VER}) - FINISHED"
+
+exit 0
