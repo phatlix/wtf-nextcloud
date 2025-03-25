@@ -86,7 +86,7 @@ done
 # --- DISCOVER NEXTCLOUD OCC BINARIES ---
 
 discover_occ_instances() {
-  mapfile -t OCC_LIST < <(find "${WEBROOT}" -type f -name occ -executable 2>/dev/null | grep -Ev '/vendor/|/tests/' | grep -E '/occ$')
+  mapfile -t OCC_LIST < <(find "${WEBROOT}" -type f -name occ 2>/dev/null | grep -Ev '/vendor/|/tests/' | grep -E '/occ$')
   if [[ ${#OCC_LIST[@]} -eq 0 ]]; then
     log_error "No Nextcloud instances found within ${WEBROOT}."
     exit 1
@@ -170,11 +170,11 @@ db_convert() {
   backup_file="${DBBAK}/${dbname}_backup_${timestamp}.sql.gz"
 
   log_step "Backing up database: ${backup_file}"
-  mysqldump --single-transaction --quick \
+  mariadb-dump --single-transaction --quick \
     -u "${dbuser}" -p"${dbpassword}" "${dbname}" | gzip > "${backup_file}"
 
   log_step "Checking for tables with non-DYNAMIC row format..."
-  dynamic_needed=$(mysql -u "${dbuser}" -p"${dbpassword}" "${dbname}" -Nse "
+  dynamic_needed=$(mariadb -u "${dbuser}" -p"${dbpassword}" "${dbname}" -Nse "
     SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
     WHERE TABLE_SCHEMA = '${dbname}'
     AND ENGINE = 'InnoDB'
@@ -189,13 +189,13 @@ db_convert() {
   fi
 
   log_step "Converting tables..."
-  mysql -u "${dbuser}" -p"${dbpassword}" "${dbname}" -Bse "
+  mariadb -u "${dbuser}" -p"${dbpassword}" "${dbname}" -Bse "
     SELECT CONCAT('ALTER TABLE \`', TABLE_NAME, '\` ROW_FORMAT=DYNAMIC;')
     FROM INFORMATION_SCHEMA.TABLES
     WHERE TABLE_SCHEMA = '${dbname}'
     AND ENGINE = 'InnoDB'
     AND ROW_FORMAT != 'DYNAMIC'
-  " | mysql -u "${dbuser}" -p"${dbpassword}" "${dbname}"
+  " | mariadb -u "${dbuser}" -p"${dbpassword}" "${dbname}"
 }
 
 
