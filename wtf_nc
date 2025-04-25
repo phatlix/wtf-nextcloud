@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 
-# WTF NEXCLOUD v2.0
+# WTF NEXCLOUD v2.1
 #
 # Script assumes the following:
 #   - bash 4+
@@ -16,7 +16,7 @@ set -euo pipefail
 
 NCPATH=""             # set the nextcloud path manually (will not search for all instances if defined)
 WEBROOT="/var/www"    # directs the find instance function (no need to scan the whole system)
-DBBAK="/var/www/dbb"  # db backups location (will be created it it don't exist)
+DBBAK="/var/www/dbb"  # db backups location (will be created if it don't exist)
 
 
 # --- COLORS ---
@@ -86,7 +86,7 @@ done
 # --- DISCOVER NEXTCLOUD OCC BINARIES ---
 
 discover_occ_instances() {
-  mapfile -t OCC_LIST < <(find "${WEBROOT}" -type f -name occ 2>/dev/null | grep -Ev '/vendor/|/tests/' | grep -E '/occ$')
+  mapfile -t OCC_LIST < <(find "${WEBROOT}" -type f -name occ 2>/dev/null | grep -Ev '/backups/' | grep -E '/occ$')
   if [[ ${#OCC_LIST[@]} -eq 0 ]]; then
     log_error "No Nextcloud instances found within ${WEBROOT}."
     exit 1

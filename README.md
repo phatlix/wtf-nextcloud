@@ -1,7 +1,7 @@
 WTF NEXTCLOUD
 =============
 
-Version: 2.0  
+Version: 2.1  
 
 ## Why?
 
@@ -75,4 +75,3 @@ Options:
   __"ADDING MISSING PRIMARY KEYS"__  
   `sudo -u nginx php ./occ db:add-missing-primary-keys`  
 
-  
