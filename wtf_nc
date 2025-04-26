@@ -86,7 +86,7 @@ done
 # --- DISCOVER NEXTCLOUD OCC BINARIES ---
 
 discover_occ_instances() {
-  mapfile -t OCC_LIST < <(find "${WEBROOT}" -type f -name occ 2>/dev/null | grep -Ev '/backups/' | grep -E '/occ$')
+  mapfile -t OCC_LIST < <(find "${WEBROOT}" -type f -name occ 2>/dev/null | grep -Ev '/backups/|/vendor/|/tests/' | grep -E '/occ$')
   if [[ ${#OCC_LIST[@]} -eq 0 ]]; then
     log_error "No Nextcloud instances found within ${WEBROOT}."
     exit 1
@@ -267,3 +267,4 @@ validate_nc_path
 log_info "WTF NEXTCLOUD (${VER}) - FINISHED"
 
 exit 0
+
